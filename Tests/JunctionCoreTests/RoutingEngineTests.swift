@@ -3,7 +3,7 @@ import XCTest
 
 final class RoutingEngineTests: XCTestCase {
     private func makeConfig() -> Config {
-        Config(
+        Config(version: 1,
             fallback: Fallback(app: "com.apple.Safari"),
             stripTrackingParams: true,
             rules: [
@@ -206,7 +206,7 @@ final class RoutingEngineTests: XCTestCase {
     }
 
     func testRegexMatcher() {
-        let config = Config(rules: [
+        let config = Config(version: 1, rules: [
             Rule(
                 name: "PR links",
                 match: Match(regex: "github\\.com/.+/pull/\\d+"),

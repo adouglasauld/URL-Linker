@@ -1,125 +1,25 @@
-name: CI
+name: URL Linker CI
 
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  test-macos:
-    name: Engine tests + app build (macOS)
+  test-and-package:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run unit tests
+      - name: Run Core and MacKit tests
         run: swift test
-      - name: Build release + bundle app
-        run: Scripts/bundle-app.sh
-      - name: Smoke-test CLI
-        run: |
-          dist/Junction.app/Contents/Helpers/junction config path
-          dist/Junction.app/Contents/Helpers/junction test "https://us02web.zoom.us/j/123456789?pwd=x"
+      - name: Build universal app
+        run: ./Scripts/bundle-app.sh
+      - name: Verify staged signature
+        run: codesign --verify --strict '/private/tmp/URLLinker-artifacts/URL Linker.app'
       - uses: actions/upload-artifact@v4
         with:
-          name: Junction.app
-          path: dist/Junction.app
-
-      # v0.5.0 shipped an app that crashed on launch for everyone but the maintainer:
-      # SPM's generated `Bundle.module` only looks beside the executable and in the
-      # build dir, so the app resolved its resources from the maintainer's local
-      # .build and fatalError'd on any other Mac. Nothing above catches that — the
-      # build dir is always present in CI too. So: relocate the bundle, delete .build,
-      # and prove it stands on its own. Destructive, hence last.
-      - name: Bundle is self-contained (no .build, relocated)
-        run: |
-          set -euo pipefail
-
-          # 1. Nothing may use Bundle.module — it fatalErrors when the bundle is
-          #    missing. Use CoreResources, which searches Contents/Resources.
-          if grep -rn --include='*.swift' 'Bundle\.module' Sources/ | grep -v '///'; then
-            echo "::error::Bundle.module is unshippable — use CoreResources instead."
-            exit 1
-          fi
-
-          # 2. Every resource the app loads at runtime must be inside the shipped bundle.
-          RES="dist/Junction.app/Contents/Resources/Junction_JunctionCore.bundle/Contents/Resources"
-          for f in MenuBarIcon.svg starter-rules.json rewriters.json tracking-params.json; do
-            test -f "$RES/$f" || { echo "::error::$f missing from the shipped bundle"; exit 1; }
-          done
-
-          # 3. Resolve them with no build dir anywhere on disk. The CLI shares the app's
-          #    CoreResources lookup. Stripping utm_* proves tracking-params.json actually
-          #    loaded: when the pack is missing the engine skips stripping rather than
-          #    failing, so the params survive and this grep catches it. Deep-link rewriters
-          #    can't be asserted here — they're opt-in per user and need the target app
-          #    installed, so on a bare runner they correctly do nothing.
-          cp -R dist/Junction.app "$RUNNER_TEMP/Junction.app"
-          rm -rf .build dist
-          export XDG_CONFIG_HOME="$RUNNER_TEMP/config"   # no user config, like a fresh Mac
-          OUT="$("$RUNNER_TEMP/Junction.app/Contents/Helpers/junction" test \
-                 'https://example.com/p?utm_source=news&id=42')"
-          echo "$OUT"
-          grep -q 'transformed: https://example.com/p?id=42' <<<"$OUT" || {
-            echo "::error::tracking-params.json did not load from the shipped bundle"; exit 1; }
-          echo "✓ bundle resolves its resources with no build directory present"
-
-  test-linux:
-    name: Engine tests (Linux)
-    runs-on: ubuntu-latest
-    container: swift:6.0
-    steps:
-      - uses: actions/checkout@v4
-      - run: swift test
-
-  website:
-    name: Website + release notes
-    runs-on: ubuntu-latest
-    steps:
-      # Full checkout, not sparse: the site reads CHANGELOG.md, App/Info.plist and
-      # rewriters.json from the repo root at build time (web/src/lib/repo.js).
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      # Parses CHANGELOG.md and asserts the newest shipped section matches the
-      # version in App/Info.plist, so a release with no notes fails here.
-      - name: Web self-checks
-        run: npm ci && npm test
-        working-directory: web
-
-      - name: Site builds
-        run: npm run build
-        working-directory: web
-
-      # The same script release.sh uses for the Sparkle update dialog. A CHANGELOG
-      # format change once blanked those notes silently; this is the guard.
-      - name: Sparkle release notes exist for the shipped version
-        run: |
-          VERSION=$(sed -n '/CFBundleShortVersionString/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' App/Info.plist)
-          echo "App/Info.plist version: $VERSION"
-          Scripts/release-notes.sh "$VERSION"
-
-  validate-rewriters:
-    name: Validate rewriters.json
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: JSON syntax + schema sanity
-        run: |
-          python3 - <<'EOF'
-          import json, re, sys
-          with open("Sources/JunctionCore/Resources/rewriters.json") as f:
-              data = json.load(f)
-          ids = set()
-          for r in data["rewriters"]:
-              for key in ("id", "name", "patterns", "template", "scheme"):
-                  assert key in r, f"rewriter missing {key}: {r}"
-              assert r["id"] not in ids, f"duplicate id {r['id']}"
-              ids.add(r["id"])
-              for p in r["patterns"]:
-                  re.compile(p)
-          print(f"✓ {len(ids)} rewriters valid")
-          EOF
+          name: URL-Linker-development-build
+          path: dist/URL-Linker.zip

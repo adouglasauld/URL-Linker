@@ -22,7 +22,7 @@ extension ConfigError: LocalizedError {
 /// Reading tolerates JSONC (comments, trailing commas); writing emits strict,
 /// pretty-printed JSON with sorted keys so git diffs stay clean.
 public final class ConfigStore {
-    public static let junctionBundleID = "com.jnahian.junction"
+    public static let junctionBundleID = "au.com.urllinker.app"
 
     public let fileURL: URL
     /// Last successfully loaded config. On invalid external edits this keeps the last-good value.
@@ -39,13 +39,7 @@ public final class ConfigStore {
 
     /// Default path: `$XDG_CONFIG_HOME/junction/config.json` or `~/.config/junction/config.json`.
     public static func defaultURL() -> URL {
-        let base: URL
-        if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
-            base = URL(fileURLWithPath: xdg)
-        } else {
-            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
-        }
-        return base.appendingPathComponent("junction/config.json")
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/URL Linker/config.json")
     }
 
     public init(fileURL: URL = ConfigStore.defaultURL()) {
@@ -56,6 +50,7 @@ public final class ConfigStore {
                 self.config = try Self.load(from: fileURL)
             } catch let e as ConfigError {
                 self.lastError = e
+                if let recovered = try? Self.load(from: fileURL.deletingLastPathComponent().appendingPathComponent("config.last-good.json")) { self.config = recovered }
             } catch {
                 self.lastError = .unreadable(String(describing: error))
             }
@@ -78,6 +73,7 @@ public final class ConfigStore {
 
     /// Parses and validates a config file's raw contents.
     public static func decode(_ raw: Data) throws -> Config {
+        guard raw.count <= 1_048_576 else { throw ConfigError.invalid(["Configuration exceeds 1 MiB"]) }
         let strict = JSONC.data(from: raw)
         let config: Config
         do {
@@ -93,10 +89,15 @@ public final class ConfigStore {
     /// Returns human-readable problems; empty means valid.
     public static func validate(_ config: Config) -> [String] {
         var problems: [String] = []
+        if config.version != 1 && config.version != 2 { problems.append("Unsupported configuration version") }
+        if config.rules.count > 1000 { problems.append("Maximum 1000 rules") }
+        if Set(config.rules.map(\.id)).count != config.rules.count { problems.append("Duplicate rule IDs") }
+        if config.version >= 2 && config.fallback.isPicker { problems.append("Fallback must be a browser") }
+        if let profile = config.fallback.profile, !ProfileDirectory.isValid(profile) { problems.append("Invalid fallback profile") }
         if config.fallback.app.isEmpty {
             problems.append("fallback.app must be a bundle identifier")
         }
-        if config.fallback.app.lowercased() == junctionBundleID {
+        if [junctionBundleID, "com.jnahian.junction"].contains(config.fallback.app.lowercased()) {
             problems.append("fallback cannot target Junction itself (loop)")
         }
         var seenRewriterIDs = Set<String>()
@@ -122,9 +123,26 @@ public final class ConfigStore {
 
         for (i, rule) in config.rules.enumerated() {
             let label = "rule \(i + 1) (\(rule.name))"
+            if config.version >= 2 {
+                if rule.name.isEmpty || rule.name.unicodeScalars.count > 160 { problems.append("\(label): name must contain 1–160 characters") }
+                if rule.rewrite != nil || !rule.match.sourceApps.isEmpty { problems.append("\(label): unsupported rewrite/source-app condition") }
+                if case .open = rule.action {} else { problems.append("\(label): automatic action must open a browser") }
+            }
             if case .deepLink(let id) = rule.action, builtinsLoaded, !knownRewriterIDs.contains(id) {
                 problems.append("\(label): unknown deep-link app \"\(id)\"")
             }
+            if let kind = rule.match.kind {
+                let value = rule.match.value ?? ""
+                if value.isEmpty || value.utf8.count > 2048 { problems.append("\(label): invalid match value") }
+                if [.exactHost, .domainAndSubdomains, .subdomainsOnly].contains(kind) {
+                    if URLPolicy.canonicalHost(value) == nil { problems.append("\(label): invalid hostname") }
+                    if kind != .exactHost && (value.contains(":") || value.split(separator: ".").allSatisfy({ $0.allSatisfy(\.isNumber) })) { problems.append("\(label): IP literals require exact host") }
+                }
+                if kind == .regex && (try? NSRegularExpression(pattern: value)) == nil { problems.append("\(label): invalid regex") }
+                if kind == .wildcard && WildcardPattern(value) == nil { problems.append("\(label): invalid wildcard") }
+                if kind == .urlPrefix && (try? URLPolicy.validate(value)) == nil { problems.append("\(label): invalid URL prefix") }
+            }
+            if case .open(_, let profile?) = rule.action, !ProfileDirectory.isValid(profile) { problems.append("\(label): invalid profile directory") }
             if rule.match.isEmpty {
                 problems.append("\(label): needs at least one matcher (patterns, regex, or sourceApps)")
             }
@@ -137,7 +155,7 @@ public final class ConfigStore {
             if let rw = rule.rewrite, (try? NSRegularExpression(pattern: rw.find)) == nil {
                 problems.append("\(label): invalid rewrite regex \"\(rw.find)\"")
             }
-            if case .open(let app, _) = rule.action, app.lowercased() == junctionBundleID {
+            if case .open(let app, _) = rule.action, [junctionBundleID, "com.jnahian.junction"].contains(app.lowercased()) {
                 problems.append("\(label): action cannot target Junction itself (loop)")
             }
         }
@@ -177,6 +195,7 @@ public final class ConfigStore {
         let data = try encoder.encode(newConfig)
 
         try Self.write(data, to: fileURL)
+        try? Self.write(data, to: fileURL.deletingLastPathComponent().appendingPathComponent("config.last-good.json"))
         // Only suppress when a watcher is armed — otherwise the flag would
         // swallow the user's first real external edit after startWatching().
         // Set after the write: a refused save must not swallow the next reload, and the

@@ -35,7 +35,7 @@ extension Array where Element == BrowserProfile {
     /// What a rule's `profile` holds: the display name, which carries across Macs where a
     /// directory doesn't. Two profiles sharing a name can only be told apart by directory.
     public func ruleValue(for profile: BrowserProfile) -> String {
-        filter { $0.displayName == profile.displayName }.count == 1 ? profile.displayName : profile.directory
+        profile.directory
     }
 
     /// The profile a rule's `profile` value means on this Mac.
@@ -64,7 +64,7 @@ public enum BrowserDiscovery {
         for appURL in urls {
             guard let bundle = Bundle(url: appURL),
                   let bundleID = bundle.bundleIdentifier,
-                  bundleID.lowercased() != "com.jnahian.junction",
+                  !["com.jnahian.junction", "au.com.urllinker.app"].contains(bundleID.lowercased()),
                   // Automation-only build (Playwright/Puppeteer), never a browser a user browses in.
                   bundleID.lowercased() != "com.google.chrome.for.testing",
                   !seen.contains(bundleID) else { continue }
@@ -171,6 +171,29 @@ public enum FirefoxProfiles {
 
 /// Reads Chromium `Local State` files to discover profiles (F5).
 public enum ChromiumProfiles {
+    public static func existingDirectory(_ directory: String, root: URL) throws -> URL {
+        guard ProfileDirectory.isValid(directory) else { throw CocoaError(.fileReadInvalidFileName) }
+        let canonical = root.resolvingSymlinksInPath().standardizedFileURL
+        let child = root.appendingPathComponent(directory).resolvingSymlinksInPath().standardizedFileURL
+        var isDir: ObjCBool = false
+        guard child.deletingLastPathComponent() == canonical, FileManager.default.fileExists(atPath: child.path, isDirectory: &isDir), isDir.boolValue else { throw CocoaError(.fileNoSuchFile) }
+        return child
+    }
+    public static func profiles(root: URL) throws -> [BrowserProfile] {
+        let file = root.appendingPathComponent("Local State")
+        guard file.resolvingSymlinksInPath().deletingLastPathComponent() == root.resolvingSymlinksInPath().standardizedFileURL else { throw CocoaError(.fileReadNoPermission) }
+        let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
+        let data = try handle.read(upToCount: 4_194_305) ?? Data()
+        guard data.count <= 4_194_304,
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let p = json["profile"] as? [String: Any], let cache = p["info_cache"] as? [String: Any], cache.count <= 128 else { throw CocoaError(.fileReadCorruptFile) }
+        return cache.compactMap { key, value in
+            guard (try? existingDirectory(key, root: root)) != nil else { return nil }
+            let raw = (value as? [String: Any])?["name"] as? String ?? key
+            let name = String(raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(160))
+            return BrowserProfile(directory: key, displayName: name.isEmpty ? key : name)
+        }.sorted { $0.directory < $1.directory }
+    }
     /// bundle ID → data directory under ~/Library/Application Support.
     public static let dataDirectories: [String: String] = [
         "com.google.Chrome": "Google/Chrome",
@@ -195,24 +218,8 @@ public enum ChromiumProfiles {
     }
 
     public static func profiles(for bundleID: String) -> [BrowserProfile] {
-        guard let localState = localStateFile(for: bundleID),
-              let data = try? Data(contentsOf: localState),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let profile = json["profile"] as? [String: Any],
-              let infoCache = profile["info_cache"] as? [String: Any] else {
-            return []
-        }
-        return infoCache.compactMap { key, value -> BrowserProfile? in
-            let info = value as? [String: Any]
-            let name = (info?["name"] as? String) ?? key
-            return BrowserProfile(directory: key, displayName: name)
-        }
-        .sorted { l, r in
-            // "Default" first, then "Profile N" numerically, then alphabetical.
-            if l.directory == "Default" { return true }
-            if r.directory == "Default" { return false }
-            return l.directory.localizedStandardCompare(r.directory) == .orderedAscending
-        }
+        guard let file = localStateFile(for: bundleID) else { return [] }
+        return (try? profiles(root: file.deletingLastPathComponent())) ?? []
     }
 
     /// The profile a web app is installed in, preferring the one it last ran in.

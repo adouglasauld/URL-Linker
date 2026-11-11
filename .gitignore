@@ -19,3 +19,5 @@ DerivedData/
 # run on every user's Mac — it must never be committed, encrypted or not.
 *-key.txt
 *-key.txt.gpg
+
+/validation/*.log

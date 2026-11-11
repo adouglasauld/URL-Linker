@@ -33,6 +33,7 @@ public enum BrowserBatchOutcome: Sendable {
 /// Executes routing decisions via NSWorkspace. Shared by the app and `junction open`.
 public struct Dispatcher {
     public var fallbackApp: String
+    public var fallbackProfile: String? = nil
     private let environment: Environment
 
     /// Resolve once and launch once per batch. Tests replace only these OS boundaries.
@@ -97,7 +98,7 @@ public struct Dispatcher {
                 completion?(.opened)
                 return .opened
             }
-            let outcome = openInBrowser(bundleID: fallbackApp, profile: nil, url: originalURL, completion: completion)
+            let outcome = openInBrowser(bundleID: fallbackApp, profile: fallbackProfile, url: originalURL, completion: completion)
             if case .needsPicker = outcome { return outcome }
             return .degradedToFallback(reason: "No app installed for \(url.scheme ?? "?")://")
 
@@ -112,7 +113,7 @@ public struct Dispatcher {
             return .copiedToClipboard
 
         case .fallback(let app, let url):
-            return openInBrowser(bundleID: app, profile: nil, url: url, completion: completion)
+            return openInBrowser(bundleID: app, profile: fallbackProfile, url: url, completion: completion)
         }
     }
 
@@ -146,6 +147,7 @@ public struct Dispatcher {
             completion?(.opened)
             return .opened
         }
+        guard !["au.com.urllinker.app", "com.jnahian.junction", Bundle.main.bundleIdentifier ?? ""].contains(bundleID) else { completion?(.failed("Cannot route to the router itself")); return .failed("Cannot route to the router itself") }
         guard let appURL = environment.applicationURL(bundleID) else {
             return openInFallback(urls: urls, instead: bundleID, reason: "\(bundleID) is not installed", completion: completion)
         }
@@ -162,7 +164,7 @@ public struct Dispatcher {
             case .firefox where !environment.firefoxProfileExists(bundleID, profile):
                 missingProfile = "Firefox profile \"\(profile)\" no longer exists"
             case .chromium:
-                launchProfile = environment.chromiumProfiles(bundleID).launchDirectory(for: profile)
+                launchProfile = environment.chromiumProfiles(bundleID).first(where: { $0.directory == profile })?.directory
                 if launchProfile == nil {
                     // Launching anyway could open someone else's profile, or a blank new one.
                     missingProfile = "\(bundleID) has no profile \"\(profile)\" on this Mac"
@@ -172,16 +174,14 @@ public struct Dispatcher {
             }
         }
         if let missingProfile {
-            if fallbackApp == Fallback.picker {
-                completion?(.needsPicker)
-                return .needsPicker
+            if fallbackApp == Fallback.picker { completion?(.needsPicker); return .needsPicker }
+            if bundleID == fallbackApp && (profile == fallbackProfile || fallbackProfile == nil) { completion?(.failed(missingProfile)); return .failed(missingProfile) }
+            if let fallbackURL = environment.applicationURL(fallbackApp) {
+                if let p = fallbackProfile, !environment.chromiumProfiles(fallbackApp).contains(where: { $0.directory == p }) { completion?(.failed("Fallback profile unavailable")); return .failed("Fallback profile unavailable") }
+                open(urls: urls, appURL: fallbackURL, bundleID: fallbackApp, profile: fallbackProfile, completion: completion)
+                return .degradedToFallback(reason: missingProfile)
             }
-            if bundleID != fallbackApp, let fallbackURL = environment.applicationURL(fallbackApp) {
-                open(urls: urls, appURL: fallbackURL, bundleID: fallbackApp, profile: nil, completion: completion)
-            } else {
-                open(urls: urls, appURL: appURL, bundleID: bundleID, profile: nil, completion: completion)
-            }
-            return .degradedToFallback(reason: missingProfile)
+            return .failed(missingProfile)
         }
 
         open(urls: urls, appURL: appURL, bundleID: bundleID, profile: launchProfile, completion: completion)
@@ -200,12 +200,11 @@ public struct Dispatcher {
             return .needsPicker
         }
         if bundleID != fallbackApp, let fallbackURL = environment.applicationURL(fallbackApp) {
-            open(urls: urls, appURL: fallbackURL, bundleID: fallbackApp, profile: nil, completion: completion)
+            if let p = fallbackProfile, !environment.chromiumProfiles(fallbackApp).contains(where: { $0.directory == p }) { completion?(.failed("Fallback profile unavailable")); return .failed("Fallback profile unavailable") }
+            open(urls: urls, appURL: fallbackURL, bundleID: fallbackApp, profile: fallbackProfile, completion: completion)
             return .degradedToFallback(reason: reason)
         }
-        // Preserve the legacy last resort when neither named browser exists.
-        for url in urls { environment.openDefault(url) }
-        let outcome = BrowserBatchOutcome.degradedToFallback(reason: reason)
+        let outcome = BrowserBatchOutcome.failed(reason + "; fallback unavailable")
         completion?(outcome)
         return outcome
     }
@@ -255,7 +254,7 @@ public struct Dispatcher {
         var profileArguments: [String]?
         if let profile {
             switch environment.family(bundleID) {
-            case .chromium: profileArguments = ["--profile-directory=\(profile)"]
+            case .chromium: profileArguments = ["--profile-directory=\(profile)", "--ignore-profile-directory-if-not-exists", "--new-window"]
             case .firefox: profileArguments = ["-P", profile]
             case .other: break
             }

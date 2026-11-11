@@ -28,9 +28,9 @@ public struct Config: Codable, Equatable, Sendable {
     public var rules: [Rule]
 
     public init(
-        version: Int = 1,
+        version: Int = 2,
         fallback: Fallback = Fallback(app: "com.apple.Safari"),
-        stripTrackingParams: Bool = true,
+        stripTrackingParams: Bool = false,
         extraTrackingParams: [String] = [],
         enabledRewriters: [String] = [],
         customRewriters: [Rewriter] = [],
@@ -120,7 +120,8 @@ public struct Fallback: Codable, Equatable, Sendable {
     public static let picker = "picker"
     /// Bundle identifier of the catch-all browser, or `Fallback.picker`.
     public var app: String
-    public init(app: String) { self.app = app }
+    public var profile: String?
+    public init(app: String, profile: String? = nil) { self.app = app; self.profile = profile }
     public var isPicker: Bool { app == Self.picker }
 }
 
@@ -154,12 +155,12 @@ public struct Rule: Codable, Sendable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case name, notes, enabled, match, action, rewrite
+        case id, name, notes, enabled, match, action, rewrite
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = UUID()
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Untitled rule"
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
@@ -170,6 +171,7 @@ public struct Rule: Codable, Sendable, Identifiable {
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encodeIfPresent(notes, forKey: .notes)
         if !enabled { try c.encode(enabled, forKey: .enabled) }
@@ -194,6 +196,9 @@ extension Rule: Equatable {
 /// Matchers within a rule are AND-ed; entries inside `patterns`/`sourceApps` are OR-ed.
 public struct Match: Codable, Equatable, Sendable {
     /// Wildcard patterns matched against host+path (see WildcardPattern).
+    public var kind: MatchKind?
+    public var value: String?
+    public init(kind: MatchKind, value: String) { self.kind = kind; self.value = value; patterns = []; regex = nil; sourceApps = [] }
     public var patterns: [String]
     /// Opt-in regex over the full URL string.
     public var regex: String?
@@ -201,15 +206,18 @@ public struct Match: Codable, Equatable, Sendable {
     public var sourceApps: [String]
 
     public init(patterns: [String] = [], regex: String? = nil, sourceApps: [String] = []) {
+        self.kind = nil; self.value = nil
         self.patterns = patterns
         self.regex = regex
         self.sourceApps = sourceApps
     }
 
-    enum CodingKeys: String, CodingKey { case patterns, regex, sourceApps }
+    enum CodingKeys: String, CodingKey { case kind, value, patterns, regex, sourceApps }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decodeIfPresent(MatchKind.self, forKey: .kind)
+        value = try c.decodeIfPresent(String.self, forKey: .value)
         patterns = try c.decodeIfPresent([String].self, forKey: .patterns) ?? []
         regex = try c.decodeIfPresent(String.self, forKey: .regex)
         sourceApps = try c.decodeIfPresent([String].self, forKey: .sourceApps) ?? []
@@ -217,12 +225,14 @@ public struct Match: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(kind, forKey: .kind)
+        try c.encodeIfPresent(value, forKey: .value)
         if !patterns.isEmpty { try c.encode(patterns, forKey: .patterns) }
         try c.encodeIfPresent(regex, forKey: .regex)
         if !sourceApps.isEmpty { try c.encode(sourceApps, forKey: .sourceApps) }
     }
 
-    public var isEmpty: Bool { patterns.isEmpty && regex == nil && sourceApps.isEmpty }
+    public var isEmpty: Bool { kind == nil && patterns.isEmpty && regex == nil && sourceApps.isEmpty }
 }
 
 /// What to do with a matched URL. Encoded as a one-of JSON object:

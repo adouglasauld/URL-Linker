@@ -6,11 +6,13 @@ struct CompiledRule: @unchecked Sendable {
     let rule: Rule
     let patterns: [WildcardPattern]
     let regex: NSRegularExpression?
+    let typedRegex: NSRegularExpression?
     let sourceApps: Set<String>
     let rewrite: (find: NSRegularExpression, replace: String)?
 
     init?(index: Int, rule: Rule) {
         guard rule.enabled, !rule.match.isEmpty else { return nil }
+        self.typedRegex = rule.match.kind == .regex ? (try? NSRegularExpression(pattern: rule.match.value ?? "")) : nil
         self.index = index
         self.rule = rule
         // If any pattern is invalid the whole rule is skipped (never silently
@@ -32,7 +34,8 @@ struct CompiledRule: @unchecked Sendable {
         }
     }
 
-    func matches(_ event: LinkEvent) -> Bool {
+    func matches(_ event: LinkEvent) throws -> Bool {
+        if let kind = rule.match.kind, let value = rule.match.value { return try TypedMatcher.evaluate(kind: kind, value: value, url: event.url, compiledRegex: typedRegex) }
         // AND across matcher kinds; OR within each list.
         if !patterns.isEmpty || regex != nil {
             var urlMatched = false
@@ -86,7 +89,7 @@ public struct RoutingEngine: Sendable {
         var url = event.url
 
         // Global transform: strip tracking params.
-        if config.stripTrackingParams {
+        if config.version < 2 && config.stripTrackingParams {
             url = stripper.strip(url)
         }
         let transformedURL = url
@@ -103,9 +106,11 @@ public struct RoutingEngine: Sendable {
         }
 
         // Ordered rules, first match wins.
-        for c in compiled where c.matches(event) {
+        for c in compiled {
+            do { if try !c.matches(event) { continue } }
+            catch { return RoutingTrace(input: event, transformedURL: transformedURL, matchedRule: nil, matchedRuleIndex: nil, rewriterID: nil, decision: fallbackDecision(url: url)) }
             var url = url
-            if let rw = c.rewrite { // pre-compiled on config load, never on the click path
+            if config.version < 2, let rw = c.rewrite { // pre-compiled on config load, never on the click path
                 let s = url.absoluteString
                 let out = rw.find.stringByReplacingMatches(
                     in: s, options: [],
@@ -127,7 +132,7 @@ public struct RoutingEngine: Sendable {
         }
 
         // Built-in rewriters (opt-in + target installed) before fallback.
-        for rewriter in rewriters.rewriters where config.enabledRewriters.contains(rewriter.id) {
+        for rewriter in rewriters.rewriters where config.version < 2 && config.enabledRewriters.contains(rewriter.id) {
             guard isSchemeHandled(rewriter.scheme),
                   let rewritten = rewriter.rewrite(url, lookup: config.slackTeams) else { continue }
             return RoutingTrace(
@@ -146,9 +151,7 @@ public struct RoutingEngine: Sendable {
 
     /// The fallback can be a browser or the picker sentinel.
     private func fallbackDecision(url: URL) -> RoutingDecision {
-        config.fallback.isPicker
-            ? .prompt(url: url)
-            : .fallback(app: config.fallback.app, url: url)
+        config.version >= 2 ? .open(app: config.fallback.app, profile: config.fallback.profile, url: url) : (config.fallback.isPicker ? .prompt(url: url) : .fallback(app: config.fallback.app, url: url))
     }
 
     private func decide(action: Action, url: URL) -> RoutingDecision {

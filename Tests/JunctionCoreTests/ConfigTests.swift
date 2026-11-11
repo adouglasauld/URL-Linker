@@ -112,7 +112,7 @@ final class ConfigStoreTests: XCTestCase {
 
     func testSaveWritesStrictSortedJSONAndRoundTrips() throws {
         let store = ConfigStore(fileURL: configURL)
-        var config = Config()
+        var config = Config(version: 1, )
         config.fallback = Fallback(app: Fallback.picker)
         config.pickerHidden = ["org.mozilla.firefox", "com.google.Chrome/Profile 2"]
         config.rules = [
@@ -246,7 +246,7 @@ final class ConfigStoreTests: XCTestCase {
 
     /// A rule deep-linking to an app that doesn't exist can never fire — say so, don't route it silently.
     func testUnknownDeepLinkTargetReported() {
-        var config = Config(rules: [
+        var config = Config(version: 1, rules: [
             Rule(name: "Gone", match: Match(patterns: ["gone.example/*"]), action: .deepLink("gone")),
         ])
         XCTAssertTrue(ConfigStore.validate(config).contains { $0.contains("unknown deep-link app") })
@@ -284,7 +284,7 @@ final class ConfigStoreTests: XCTestCase {
 
     func testInvalidFileKeepsLastGood() throws {
         let store = ConfigStore(fileURL: configURL)
-        var config = Config()
+        var config = Config(version: 1)
         config.rules = [Rule(name: "Keep me", match: Match(patterns: ["example.com"]), action: .clipboard)]
         try store.save(config)
 

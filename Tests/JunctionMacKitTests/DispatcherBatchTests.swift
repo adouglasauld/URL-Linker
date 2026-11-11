@@ -44,7 +44,7 @@ final class DispatcherBatchTests: XCTestCase {
     }
 
     func testProfilesLaunchOneProcessWithEveryURL() {
-        for (family, flags) in [(BrowserFamily.chromium, ["--profile-directory=Work"]), (.firefox, ["-P", "Work"])] {
+        for (family, flags) in [(BrowserFamily.chromium, ["--profile-directory=Work", "--ignore-profile-directory-if-not-exists", "--new-window"]), (.firefox, ["-P", "Work"])] {
             var environment = environment()
             var launches: [[String]] = []
             environment.family = { _ in family }
@@ -90,9 +90,8 @@ final class DispatcherBatchTests: XCTestCase {
         if case .degradedToFallback = outcome {} else { XCTFail("Expected degraded result") }
     }
 
-    /// `Profile 2` is Work on the Mac that wrote the rule; here Work is `Profile 5`, and
-    /// `Profile 2` is someone else.
-    func testChromiumProfileResolvesByNameAcrossMacs() {
+    /// Directory identity is local; a display-name rule cannot silently migrate to another directory.
+    func testChromiumProfileNameCannotRetargetDirectoryIdentity() {
         var environment = environment()
         environment.family = { _ in .chromium }
         environment.chromiumProfiles = { _ in [
@@ -103,7 +102,7 @@ final class DispatcherBatchTests: XCTestCase {
         environment.openApplication = { _, configuration, _ in launches.append(configuration.arguments) }
         Dispatcher(fallbackApp: "picker", environment: environment)
             .openInBrowser(bundleID: "test.browser", profile: "Work", urls: urls)
-        XCTAssertEqual(launches, [["--profile-directory=Profile 5"] + urls.map(\.absoluteString)])
+        XCTAssertTrue(launches.isEmpty, "Display names must not silently retarget a directory destination")
     }
 
     func testChromiumDirectoryValueStillWorks() {
@@ -114,7 +113,7 @@ final class DispatcherBatchTests: XCTestCase {
         environment.openApplication = { _, configuration, _ in launches.append(configuration.arguments) }
         Dispatcher(fallbackApp: "picker", environment: environment)
             .openInBrowser(bundleID: "test.browser", profile: "Profile 2", urls: urls)
-        XCTAssertEqual(launches, [["--profile-directory=Profile 2"] + urls.map(\.absoluteString)])
+        XCTAssertEqual(launches, [["--profile-directory=Profile 2", "--ignore-profile-directory-if-not-exists", "--new-window"] + urls.map(\.absoluteString)])
     }
 
     func testMissingChromiumProfileFallsBackOnceForEntireBatch() {
@@ -146,7 +145,7 @@ final class DispatcherBatchTests: XCTestCase {
     }
 
     /// When Chrome is the fallback, Junction can't go through the system default: that's Junction.
-    func testMissingProfileInTheFallbackBrowserOpensItWithoutAProfile() {
+    func testMissingProfileInTheFallbackBrowserNeverDropsProfile() {
         var environment = environment()
         environment.family = { _ in .chromium }
         environment.chromiumProfiles = { _ in [BrowserProfile(directory: "Default", displayName: "Personal")] }
@@ -154,8 +153,8 @@ final class DispatcherBatchTests: XCTestCase {
         environment.openURLs = { urls, _, _, _ in requests.append(urls) }
         let outcome = Dispatcher(fallbackApp: "chrome", environment: environment)
             .openInBrowser(bundleID: "chrome", profile: "Work", urls: urls)
-        XCTAssertEqual(requests, [urls])
-        if case .degradedToFallback = outcome {} else { XCTFail("Expected degraded result") }
+        XCTAssertTrue(requests.isEmpty)
+        if case .failed = outcome {} else { XCTFail("Expected safe terminal failure") }
     }
 
     /// Without Full Disk Access the list comes back empty: rules written as directories keep
@@ -166,12 +165,12 @@ final class DispatcherBatchTests: XCTestCase {
         XCTAssertNil([BrowserProfile]().launchDirectory(for: "Work"))
     }
 
-    func testRuleValuePrefersTheNameUnlessItIsAmbiguous() {
+    func testRuleValueAlwaysUsesDirectoryIdentity() {
         let work = BrowserProfile(directory: "Profile 1", displayName: "Work")
         let twin = BrowserProfile(directory: "Profile 2", displayName: "Twin")
         let otherTwin = BrowserProfile(directory: "Profile 3", displayName: "Twin")
         let profiles = [work, twin, otherTwin]
-        XCTAssertEqual(profiles.ruleValue(for: work), "Work")
+        XCTAssertEqual(profiles.ruleValue(for: work), "Profile 1")
         XCTAssertEqual(profiles.ruleValue(for: otherTwin), "Profile 3")
         XCTAssertEqual(profiles.matching("Profile 3"), otherTwin)
     }

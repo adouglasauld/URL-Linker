@@ -1,102 +1,18 @@
-#!/usr/bin/env bash
-# Assembles Junction.app from the SPM release build.
-#
-# Usage:
-#   Scripts/bundle-app.sh                 # build + bundle into dist/
-#   CODESIGN_IDENTITY="Developer ID Application: …" Scripts/bundle-app.sh   # + sign
+#!/bin/bash
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
-ROOT="$PWD"
-DIST="$ROOT/dist"
-APP="$DIST/Junction.app"
-
-# Universal: a host-arch-only build won't launch at all on the other architecture
-# ("not supported on this Mac"), and Rosetta can't help an arm64 binary on Intel.
-# -isysroot for the link: swiftc links through `clang --sysroot`, and clang reads the SDK
-# version only from -isysroot. Without it the binary records the deployment target (13.0) as
-# its SDK, and macOS 26+ draws the whole app in its pre-Liquid Glass compatibility look.
-BUILD=(swift build -c release --arch arm64 --arch x86_64
-  -Xswiftc -Xclang-linker -Xswiftc -isysroot
-  -Xswiftc -Xclang-linker -Xswiftc "$(xcrun --sdk macosx --show-sdk-path)")
-echo "▸ swift build -c release (universal)"
-"${BUILD[@]}"
-
-# Ask SwiftPM: the universal output dir moved (.build/apple → .build/out) across toolchains,
-# and a hardcoded path silently packages whatever stale binary is left at the old one.
-BIN="$("${BUILD[@]}" --show-bin-path)"
-
-echo "▸ assembling $APP"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
-
-cp "$BIN/Junction" "$APP/Contents/MacOS/Junction"
-cp "$BIN/junction-cli" "$APP/Contents/Helpers/junction"   # CLI, exposed via Homebrew `binary` stanza
-cp "$ROOT/App/Info.plist" "$APP/Contents/Info.plist"
-
-# A toolchain update broke the SDK stamp once without anyone noticing; fail loudly instead.
-SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
-for bin in "$APP/Contents/MacOS/Junction" "$APP/Contents/Helpers/junction"; do
-  stamps="$(otool -l "$bin" | awk '$1 == "sdk" { print $2 }' | sort -u)"
-  if [ "$stamps" != "$SDK_VERSION" ]; then
-    echo "✗ $bin records SDK '$stamps', expected $SDK_VERSION" >&2
-    exit 1
-  fi
-done
-
-# CFBundleVersion is what Sparkle compares; derive it from the build time so it's
-# always monotonic — no manual bump, no silent "no update" from a stale integer.
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%Y%m%d%H%M)" "$APP/Contents/Info.plist"
-
-# Sparkle.framework powers auto-update; the binary finds it via an added rpath.
-SPARKLE_FW="$(find "$ROOT/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework" -type d -name Sparkle.framework -path '*macos*' | head -1)"
-mkdir -p "$APP/Contents/Frameworks"
-cp -R "$SPARKLE_FW" "$APP/Contents/Frameworks/"
-install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Junction" 2>/dev/null || true
-
-# SPM resource bundles (rewriters.json, tracking-params.json, starter-rules.json).
-# Resources/ only — codesign treats anything in Helpers/ as code and rejects
-# SPM's flat resource bundles. The CLI finds these via CoreResources (../Resources).
-for bundle in "$BIN"/*.bundle; do
-  [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"
-done
-
-# App icon, if present (generate with Scripts/make-icon.sh or add App/AppIcon.icns)
-if [ -f "$ROOT/App/AppIcon.icns" ]; then
-  cp "$ROOT/App/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
-fi
-
-if [ -n "${CODESIGN_IDENTITY:-}" ]; then
-  echo "▸ codesigning (Hardened Runtime)"
-  # ponytail: --deep does NOT properly sign Sparkle's nested XPC services
-  # (org.sparkle-project.*) or Updater.app, so this bundle will FAIL notarization.
-  # Before adding Developer ID secrets, sign Sparkle's nested code inside-out first.
-  codesign --force --options runtime --entitlements "$ROOT/App/Junction.entitlements" \
-    --sign "$CODESIGN_IDENTITY" "$APP/Contents/Helpers/junction"
-  codesign --force --options runtime --entitlements "$ROOT/App/Junction.entitlements" \
-    --deep --sign "$CODESIGN_IDENTITY" "$APP"
-  codesign --verify --strict "$APP"
-else
-  # The maintainer's self-signed release identity, when this keychain has it. macOS ties
-  # Full Disk Access to the signature's designated requirement: ad-hoc, that's this build's
-  # hash, so every update silently revokes the grant; self-signed, it's the certificate,
-  # which never changes. No Hardened Runtime: a self-signed certificate has no Team ID, and
-  # library validation would refuse to load Sparkle. Not `find-identity -v`: a self-signed
-  # certificate is never "valid" (trusted), only present.
-  SIGN_ID="$(security find-identity -p codesigning 2>/dev/null | awk '/"Junction Code Signing"/ { print $2; exit }' || true)"
-  if [ -n "$SIGN_ID" ]; then
-    echo "▸ codesigning (Junction Code Signing)"
-    codesign --force --deep --sign "$SIGN_ID" "$APP"
-  else
-    echo "▸ skipping codesign (set CODESIGN_IDENTITY to sign)"
-    # Ad-hoc sign so the app runs locally.
-    codesign --force --deep --sign - "$APP"
-  fi
-fi
-
-echo "✓ $APP"
-echo
-echo "Run it:            open '$APP'"
-echo "Install CLI:       ln -sf '$APP/Contents/Helpers/junction' /usr/local/bin/junction"
-echo "Installer DMG:     Scripts/make-dmg.sh"
-echo "Publish update:    Scripts/release.sh"
+swift build -c release --arch arm64 --arch x86_64
+BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+APP="/private/tmp/URLLinker-artifacts/URL Linker.app"
+mkdir -p "$PWD/dist"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN/URLLinker" "$APP/Contents/MacOS/URLLinker"
+cp App/Info.plist "$APP/Contents/Info.plist"
+cp LICENSE "$APP/Contents/Resources/Junction-LICENSE.txt"
+for bundle in "$BIN"/*.bundle; do [ ! -e "$bundle" ] || cp -R "$bundle" "$APP/Contents/Resources/"; done
+cp App/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+xattr -cr "$APP"
+codesign --force --options runtime --sign "${CODESIGN_IDENTITY:--}" "$APP"
+codesign --verify --strict "$APP"
+ditto --norsrc --noextattr -c -k --keepParent "$APP" "$PWD/dist/URL-Linker.zip"
+printf '%s\n' "$APP" "$PWD/dist/URL-Linker.zip"
