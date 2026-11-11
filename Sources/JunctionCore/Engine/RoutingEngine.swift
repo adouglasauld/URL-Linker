@@ -96,19 +96,28 @@ public struct RoutingEngine: Sendable {
         var event = event
         event.url = url
 
+        let matchingURL = config.version >= 2 ? SafeLinks.matchingURL(for: url) : url
+        var matchingEvent = event
+        matchingEvent.url = matchingURL ?? url
+
         // ⌥-click escape hatch beats everything.
         if event.forcePicker {
             return RoutingTrace(
-                input: event, transformedURL: transformedURL,
+                input: event, transformedURL: transformedURL, matchingURL: matchingURL,
                 matchedRule: nil, matchedRuleIndex: nil, rewriterID: nil,
                 decision: .prompt(url: url)
             )
         }
 
+        // Invalid wrappers use fallback without matching ambiguous/untrusted hints.
+        guard matchingURL != nil else {
+            return RoutingTrace(input: event, transformedURL: transformedURL, matchingURL: nil, matchedRule: nil, matchedRuleIndex: nil, rewriterID: nil, decision: fallbackDecision(url: url))
+        }
+
         // Ordered rules, first match wins.
         for c in compiled {
-            do { if try !c.matches(event) { continue } }
-            catch { return RoutingTrace(input: event, transformedURL: transformedURL, matchedRule: nil, matchedRuleIndex: nil, rewriterID: nil, decision: fallbackDecision(url: url)) }
+            do { if try !c.matches(matchingEvent) { continue } }
+            catch { return RoutingTrace(input: event, transformedURL: transformedURL, matchingURL: matchingURL, matchedRule: nil, matchedRuleIndex: nil, rewriterID: nil, decision: fallbackDecision(url: url)) }
             var url = url
             if config.version < 2, let rw = c.rewrite { // pre-compiled on config load, never on the click path
                 let s = url.absoluteString
@@ -124,7 +133,7 @@ public struct RoutingEngine: Sendable {
             var firedRewriter: String?
             if case .deepLink(_, let id, _) = decision { firedRewriter = id }
             return RoutingTrace(
-                input: event, transformedURL: transformedURL,
+                input: event, transformedURL: transformedURL, matchingURL: matchingURL,
                 matchedRule: c.rule.name, matchedRuleIndex: c.index,
                 rewriterID: firedRewriter,
                 decision: decision
@@ -136,14 +145,14 @@ public struct RoutingEngine: Sendable {
             guard isSchemeHandled(rewriter.scheme),
                   let rewritten = rewriter.rewrite(url, lookup: config.slackTeams) else { continue }
             return RoutingTrace(
-                input: event, transformedURL: transformedURL,
+                input: event, transformedURL: transformedURL, matchingURL: matchingURL,
                 matchedRule: nil, matchedRuleIndex: nil, rewriterID: rewriter.id,
                 decision: .deepLink(url: rewritten, rewriterID: rewriter.id, originalURL: url)
             )
         }
 
         return RoutingTrace(
-            input: event, transformedURL: transformedURL,
+            input: event, transformedURL: transformedURL, matchingURL: matchingURL,
             matchedRule: nil, matchedRuleIndex: nil, rewriterID: nil,
             decision: fallbackDecision(url: url)
         )

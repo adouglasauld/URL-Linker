@@ -43,6 +43,8 @@ public struct RoutingTrace: Sendable {
     public var input: LinkEvent
     /// URL after global transforms (tracking-param strip), before per-rule rewrite.
     public var transformedURL: URL
+    /// Destination used for matching only; nil means an invalid protected wrapper.
+    public var matchingURL: URL? = nil
     /// Name of the matched rule, if any. `nil` means fallback or built-in rewriter.
     public var matchedRule: String?
     /// Index of the matched rule in the config's rule array.

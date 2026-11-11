@@ -35,7 +35,9 @@ struct FailedLink: Identifiable { let id = UUID(); let url: URL; let reason: Str
         catch { message = error.localizedDescription }
     }
     func test() {
-        do { let url = try URLPolicy.validate(testURL); let trace = engine.trace(LinkEvent(url: url)); testResult = "\(trace.matchedRule.map { "Rule: \($0)" } ?? "Fallback") → \(destination(trace.decision))" }
+        do { let url = try URLPolicy.validate(testURL); let trace = engine.trace(LinkEvent(url: url)); testResult = "\(trace.matchedRule.map { "Rule: \($0)" } ?? "Fallback") → \(destination(trace.decision))"
+            if let matchURL = trace.matchingURL, matchURL != url { testResult += "\nMatched Safe Links destination: \(matchURL.host ?? ""). Original protected link will be opened." }
+            else if trace.matchingURL == nil { testResult += "\nInvalid Safe Links destination; using fallback." } }
         catch { testResult = "Invalid HTTP/HTTPS URL" }
     }
     func destination(_ decision: RoutingDecision) -> String {
@@ -248,6 +250,7 @@ struct SettingsView: View {
         let menu = NSMenu(); menu.addItem(withTitle: "Settings / Test URL…", action: #selector(settings), keyEquivalent: ","); menu.addItem(withTitle: "Quit URL Linker", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); item.menu = menu
         if !UserDefaults.standard.bool(forKey: "hasOpenedSettings") { settings(); UserDefaults.standard.set(true, forKey: "hasOpenedSettings") }
     }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { settings(); return true }
     @objc func settings() { window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func receive(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         guard let text = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue, let url = try? URLPolicy.validate(text) else { model.message = "Rejected invalid or unsupported URL"; return }

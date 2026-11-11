@@ -32,3 +32,9 @@ This is a runnable development build; the complete specification is not yet acce
 - No distribution identity was supplied; Developer ID signing/notarization/stapling and clean-machine installation remain open.
 
 No Full Disk Access or Accessibility permission requirement was introduced, but absence of such a requirement across supported systems remains a runtime acceptance gate. No test creates/removes real browser profiles or reads their contents.
+
+## Safe Links update — v0.1.1
+
+171 tests passed (141 Core + 30 MacKit), exit0, including 11 new synthetic Safe Links tests. Destination extraction is local-only and strict; launching retains the original protected wrapper. Tests cover all matcher kinds, wrapper host boundaries, one-layer decoding, unsafe/duplicate/missing parameters, nesting limit, precedence, fallback and manual override. Existing v1 semantics remain covered. This feature does not fetch redirects or change Microsoft policies.
+
+Installed v0.1.1 strict signature verification passed. On-device dry-run testing of an existing user rule selected its configured Vivaldi profile for a supplied Safe Links URL, and system-handler launch opened the destination in that profile's visibly named Vivaldi window. No rules were modified; no full user URLs, tracking data or page contents were added to repository fixtures/logs. This targeted check does not close the remaining browser/OS matrix.
